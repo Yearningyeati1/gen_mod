@@ -1,7 +1,3 @@
-Here is a complete README.md file for your project, based on the setup and files you've described.
-
-Yes, you absolutely should—and are likely required to—mention the licenses. This is critical for academic honesty and for anyone who wants to use your code. I have added a prominent section for this.
-
 A Hybrid Generative-Deterministic Framework for 3D Face Reconstruction
 This repository contains the official code for the B.Tech project, "A Hybrid Generative-Deterministic Framework for 3D Face Reconstruction."
 
