@@ -22,6 +22,7 @@ class MICAInference:
             model_dir='micalib.models', 
             model_name=self.cfg.model.name
         )(self.cfg, self.device)
+        print(self.mica)
         
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         if 'arcface' in checkpoint:
@@ -53,10 +54,14 @@ def infer():
             opdict = mica_model.mica.decode(codedict)
             
             flame_params = opdict['pred_canonical_shape_vertices'].cpu().numpy().tolist()
-            
+            code = opdict['pred_shape_code'].cpu().numpy().tolist()
+            print('################')
+            print(len(code[0]))
+            print('###############')
         return jsonify({
             'success': True,
-            'flame_params': flame_params
+            'flame_params': flame_params,
+            'code': code
         })
         
     except Exception as e:

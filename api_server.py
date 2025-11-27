@@ -17,6 +17,7 @@ from insightface.utils import face_align
 from skimage.transform import estimate_transform, warp
 
 # --- Add src to path ---
+# Make sure this path is correct for your server
 sys.path.append("./src") 
 
 # --- Import models and config ---
@@ -37,7 +38,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-# --- MICA HTTP Wrapper ---
+# --- MICA HTTP Wrapper (Copied from simplified_tester.py) ---
 class MICAHTTPWrapper:
     def __init__(self, api_url='http://localhost:5010'):
         self.api_url = api_url
@@ -64,7 +65,7 @@ class MICAHTTPWrapper:
         if response.status_code == 200:
             result = response.json()
             if result['success']:
-                return torch.tensor(result['flame_params']).float()
+                return [torch.tensor(result['flame_params']).float(),torch.tensor(result['code']).float()]
             else:
                 raise RuntimeError(f"MICA inference failed: {result['error']}")
         else:
@@ -84,8 +85,8 @@ flame_faces = None
 # --- Global Constants for Preprocessing ---
 input_mean = 127.5
 input_std = 127.5
-ofer_weight = 1.0
-mica_weight = 0.0
+ofer_weight = 2.0
+mica_weight = 8.0
 
 def load_all_models(args):
     """
@@ -149,6 +150,7 @@ def load_all_models(args):
         raise e
         
     # 7. Rank Model (Wrapped in TesterRank)
+    # --- Config logic copied from test_amiya.py ---
     try:
         logger.info("[SERVER] Loading rank model...")
         
@@ -158,7 +160,7 @@ def load_all_models(args):
         if cfg_file is not None:
             cfg_rank = update_cfg(cfg_rank, cfg_file)
 
-
+        # --- Manually copy settings from test_amiya.py (lines 45-71) ---
         if not hasattr(args, 'checkpoint1'):
              logger.error("Command-line args are missing '--checkpoint1'. Cannot load rank model.")
              raise ValueError("Missing args.checkpoint1")
@@ -179,7 +181,7 @@ def load_all_models(args):
         cfg_rank.model.istrial = False
         cfg_rank.net.losstype = 'Softmaxlistnetloss'
         cfg_rank.net.numattn = 1
-        cfg_rank.net.predims = [300,50,10] 
+        cfg_rank.net.predims = [300,50,10]  # <-- This key fixes the IndexError
         cfg_rank.model.flametype = 'flame20'
         cfg_rank.dataset.flametype = 'flame20'
         cfg_rank.model.nettype = 'listnet'
@@ -187,7 +189,7 @@ def load_all_models(args):
         cfg_rank.net.shape_dim = 5355
         cfg_rank.net.context_dim = 1024
         cfg_rank.model.testing = True
-  
+        # --- End of copied settings ---
 
         # 1. Create the internal model
         model_rank_internal = FlameParamRankModel(cfg_rank, device)
@@ -206,16 +208,20 @@ def load_all_models(args):
         raise e
 
     # 8. Main Diffusion Model (model1 in tester)
+    # --- Config logic copied from test_amiya.py ---
     try:
         logger.info("[SERVER] Loading main diffusion model (for encode/decode)...")
         
         # Clone the main server config
         cfg1 = cfg.clone()
+
+        # --- Manually copy settings from test_amiya.py (lines 88-101) ---
+        # --- Manually copy settings from test_amiya.py (lines 88-101) ---
         if not hasattr(args, 'checkpoint2'):
              logger.error("Command-line args are missing '--checkpoint2'. Cannot load main model.")
              raise ValueError("Missing args.checkpoint2")
 
-        # ...config
+        # ... (config lines) ...
         
         cfg1.train.resume_checkpoint = args.checkpoint2
 
@@ -232,6 +238,10 @@ def load_all_models(args):
         cfg1.dataset.flametype = 'flame20'
         cfg1.model.flametype = 'flame20'
         cfg1.model.testing = True
+        # --- End of copied settings ---
+        
+        # Create the model. The constructor will auto-load the checkpoint
+        # because cfg1.train.resume is True, just like in test_amiya.py
         main_model = FlameParamDiffusionModel(cfg1, device)
         main_model.eval()
         
@@ -257,7 +267,7 @@ def infer():
     This endpoint receives a raw image file, performs all
     preprocessing, and then runs inference.
     """
-    global input_mean, input_std 
+    global input_mean, input_std # Access global constants
     
     try:
         # 1. --- RECEIVE AND LOAD IMAGE ---
@@ -323,17 +333,36 @@ def infer():
                  return jsonify({"success": False, "error": "Main model did not predict 'pred_mesh'"}), 500
             
             pred_shape_meshes = opdict1['pred_mesh']
+            pred_flameparam1 = opdict1['pred_flameparam']
+            print('#-------------------------------#')
+            print(pred_flameparam1.shape)
+            print('#-------------------------------#')
 
             # --- MICA Fusion (optional) ---
             if mica_model:
                 try:
-                    mica_flame_params = mica_model.get_flame_params(normtransimage.unsqueeze(0), arcface.unsqueeze(0))
-                    mica_flame_params = mica_flame_params.tile(numface, 1, 1)
+                    mica_flame_params_ = mica_model.get_flame_params(normtransimage.unsqueeze(0), arcface.unsqueeze(0))
+                    mica_flame_params = mica_flame_params_[0].tile(numface, 1, 1)
+                    mica_code = mica_flame_params_[1][0]
+                    print('#----------%')
+                    print(len(mica_code))
+                    print('#----------%')
+                    print('#----------%')
+                    print(len(pred_flameparam1[0]))
+                    print('#----------%')
                     logger.info("MICA params obtained, fusion would happen here.")
                 except Exception as e:
                     logger.warning(f"MICA inference failed during fusion: {e}")
 
             # --- Ranking ---
+            ############################################################################
+            # try fusing
+
+            if mica_flame_params is not None:
+                pred_shape_meshes = fuse_flame_params(pred_shape_meshes,mica_flame_params)
+                logger.info(f"Fused FLAME params - OFER:0.2, MICA:0.8")
+
+            ############################################################################
             arcface_rank = arcface.clone()
             maxindex, sortindex = rank_model.getmaxsampleindex(arcface_rank, normtransimage, imagefarl, pred_shape_meshes)
             
@@ -344,7 +373,8 @@ def infer():
         return jsonify({
             "success": True,
             "vertices": best_mesh_vertices.tolist(),
-            "faces": flame_faces.numpy().tolist()
+            "faces": flame_faces.numpy().tolist(),
+            "code" : mica_code.numpy().tolist() #pred_flameparam1[best_mesh_idx].numpy().tolist()
         })
 
     except Exception as e:
@@ -352,7 +382,73 @@ def infer():
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
-
+    
+#-----------------------------------------------------------------------
+# Adding fusion
+def fuse_flame_params(ofer_params, mica_params):
+        """
+        Fuse FLAME parameters from OFER and MICA models with per-mesh scaling.
+        Supports PyTorch tensors.
+        
+        Args:
+            ofer_params: torch.Tensor [B, 5023, 3]
+            mica_params: torch.Tensor [B, 5023, 3]
+            
+        Returns:
+            fused_params: torch.Tensor [B, 5023, 3]
+        """
+        import torch
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        B = ofer_params.shape[0]
+        ofer_dim = ofer_params.shape[1]
+        mica_dim = mica_params.shape[1]
+        
+        logger.info(f"Fusing FLAME params - OFER dim: {ofer_dim}, MICA dim: {mica_dim}")
+        
+        # Handle shape mismatch
+        if ofer_dim != mica_dim:
+            min_dim = min(ofer_dim, mica_dim)
+            ofer_params = ofer_params[:, :min_dim, :]
+            mica_params = mica_params[:, :min_dim, :]
+            logger.warning(f"FLAME parameter dimension mismatch. Using first {min_dim} dimensions.")
+        
+        device = ofer_params.device
+        scaled_ofer = torch.zeros_like(ofer_params, device=device)
+        
+        for i in range(B):
+            ofer = ofer_params[i]
+            mica = mica_params[i]
+            
+            # --- Step 1: Center both meshes ---
+            ofer_center = ofer.mean(dim=0)
+            mica_center = mica.mean(dim=0)
+            ofer_c = ofer - ofer_center
+            mica_c = mica - mica_center
+            
+            # --- Step 2: Compute RMS-based scaling factor ---
+            ofer_rms = torch.sqrt(torch.sum(ofer_c ** 2))
+            mica_rms = torch.sqrt(torch.sum(mica_c ** 2))
+            scale = mica_rms / (ofer_rms + 1e-8)
+            
+            # --- Step 3: Apply scaling and recenter to MICA’s centroid ---
+            ofer_scaled = ofer_c * scale + mica_center
+            
+            scaled_ofer[i] = ofer_scaled
+            
+            logger.debug(f"Mesh {i}: scale={scale.item():.4f}, "
+                        f"OFER RMS={ofer_rms.item():.4f}, MICA RMS={mica_rms.item():.4f}")
+        ofer_weight=0.2
+        mica_weight=0.8
+        
+        # --- Step 4: Weighted fusion ---
+        fused_params = (ofer_weight * scaled_ofer +
+                        mica_weight * mica_params)
+        
+        logger.info(f"Fusion completed - output shape: {fused_params.shape}")
+        return fused_params
+#------------------------------------------------------------------------------
 # --- Main execution ---
 if __name__ == '__main__':
     # 1. Parse command-line arguments and update the main 'cfg'
